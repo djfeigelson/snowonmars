@@ -1,0 +1,45 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0705;
+  color: #d9d2c8;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+#stage, #stage canvas {
+  position: fixed;
+  inset: 0;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+#mark, #hint {
+  position: fixed;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.35em;
+  text-transform: lowercase;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+#mark {
+  bottom: calc(22px + env(safe-area-inset-bottom));
+  opacity: 0.28;
+}
+
+#hint {
+  top: 50%;
+  opacity: 0;
+  animation: hint-in 2.5s ease 2.5s forwards;
+  transition: opacity 1.5s ease;
+}
+body.touched #hint { opacity: 0 !important; animation: none; }
+
+@keyframes hint-in { to { opacity: 0.35; } }
