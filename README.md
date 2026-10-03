@@ -8,17 +8,18 @@ A multilayered site modeled on rough opal.
 public/              ← everything the site serves
   index.html
   css/style.css
-  js/shaders.js      ← GLSL: stone, rubbed window, Bragg play-of-colour
-  js/sketch.js       ← p5: rubbing, clouding over, viewing angle, events
+  js/shaders.js      ← GLSL: pockets, Bragg play-of-colour, grain dissolve
+  js/sketch.js       ← p5: random layout, taps, timing, viewing angle, events
   js/vendor/p5.min.js
 amplify.yml          ← tells AWS Amplify to serve /public as-is
 ```
 
-## Layer 0 — "the rough"
-- Drag to rub a window into the stone; it fogs (milky, like drying hydrophane) and closes after ~15–25 s.
-- Colour = Bragg diffraction per grain: λ = 2·n·(0.816·D)·cosθ. Cursor / phone tilt sets θ.
-- Lifetime rubbing raises `depth` (saved in the browser), which makes large-sphere (red) grains more common.
-- Future layers can listen for `window` event `opal:reveal` → `{ open, depth }`.
+## Layer 0 — the black field
+- Starts fully black, no text.
+- Every load scatters hidden pockets at random. Every one is opal (black, crystal or fire) and reveals when tapped; the black space between them does nothing.
+- Tapping a live pocket opens it outward from the tap point. Colour follows Bragg diffraction, λ = 2·n·(0.816·D)·cosθ, with θ set by the cursor or phone tilt.
+- After ~9 s it breaks down: the colour slides toward violet (the spheres "shrink") and the pocket dissolves into grains from the rim inward.
+- Events for future layers: `opal:open` {index, variety, x, y} and `opal:potch` {index, x, y}.
 - Tuning knobs: `CONFIG` at the top of `js/sketch.js`.
 
 ## Preview locally

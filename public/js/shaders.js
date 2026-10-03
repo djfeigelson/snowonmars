@@ -1,71 +1,51 @@
 // ─────────────────────────────────────────────────────────────
-//  snow on mars — layer 0: "the rough"
-//  Shaders live here as strings so the site also works when
-//  index.html is opened straight from disk (no local server).
+//  snow on mars — layer 0 shaders
+//  Kept as strings so index.html also works opened from disk.
 // ─────────────────────────────────────────────────────────────
+
+const MAX_REGIONS = 12;
 
 const VERT = `
 precision highp float;
 attribute vec3 aPosition;
 void main() {
   vec4 p = vec4(aPosition, 1.0);
-  p.xy = p.xy * 2.0 - 1.0;          // p5 rect is a 0..1 quad → fill clip space
+  p.xy = p.xy * 2.0 - 1.0;
   gl_Position = p;
 }
 `;
 
 const FRAG = `
 precision highp float;
+#define MAX_REGIONS ${MAX_REGIONS}
 
-uniform vec2  uRes;     // canvas size in device pixels
-uniform float uTime;    // seconds
-uniform sampler2D uMask;// rubbed "window" (white = rubbed open)
-uniform vec2  uView;    // viewing / light angle, -1..1 (cursor or device tilt)
-uniform float uDepth;   // 0..1, grows with how much the visitor has rubbed (ever)
-uniform float uSeed;
+uniform vec2  uRes;
+uniform float uDpr;
+uniform float uTime;
+uniform vec2  uView;                 // viewing angle, -1..1 (cursor / tilt)
+uniform float uCount;                // number of live regions
+uniform vec4  uGeo[MAX_REGIONS];     // cx, cy, R, variety
+uniform vec4  uShape[MAX_REGIONS];   // a1, a2, a3, seed
+uniform vec4  uPhase[MAX_REGIONS];   // phi1, phi2, phi3, -
+uniform vec4  uState[MAX_REGIONS];   // grow 0..1, life 0..1, tapX, tapY
 
 // ── noise ────────────────────────────────────────────────────
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 vec2  hash22(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz) * p3.zy); }
-
 float vnoise(vec2 p){
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3. - 2. * f);
   return mix(mix(hash12(i), hash12(i + vec2(1,0)), u.x),
              mix(hash12(i + vec2(0,1)), hash12(i + vec2(1,1)), u.x), u.y);
 }
-float fbm(vec2 p){
+float fbm4(vec2 p){
   float v = 0., a = .5;
   mat2 r = mat2(.8, -.6, .6, .8);
-  for (int i = 0; i < 6; i++){ v += a * vnoise(p); p = r * p * 2.03 + 11.7; a *= .5; }
-  return v;
-}
-float fbm3(vec2 p){
-  float v = 0., a = .5;
-  mat2 r = mat2(.8, -.6, .6, .8);
-  for (int i = 0; i < 3; i++){ v += a * vnoise(p); p = r * p * 2.03 + 11.7; a *= .5; }
+  for (int i = 0; i < 4; i++){ v += a * vnoise(p); p = r * p * 2.02 + 7.3; a *= .5; }
   return v;
 }
 
-// Voronoi: returns (F1, F2-F1) and the winning cell id.
-vec2 voronoi(vec2 p, out vec2 id){
-  vec2 n = floor(p), f = fract(p);
-  float d1 = 8., d2 = 8.;
-  id = n;
-  for (int j = -1; j <= 1; j++)
-  for (int i = -1; i <= 1; i++){
-    vec2 g = vec2(float(i), float(j));
-    vec2 r = g + hash22(n + g + uSeed) - f;
-    float d = dot(r, r);
-    if (d < d1){ d2 = d1; d1 = d; id = n + g; }
-    else if (d < d2){ d2 = d; }
-  }
-  d1 = sqrt(d1); d2 = sqrt(d2);
-  return vec2(d1, d2 - d1);
-}
-
-// ── light ────────────────────────────────────────────────────
-// Wavelength (nm) → RGB.  (Zucconi's 6-lobe fit + falloff at the ends)
+// ── wavelength (nm) → RGB ────────────────────────────────────
 vec3 bump3y(vec3 x, vec3 yo){ vec3 y = 1. - x * x; return clamp(y - yo, 0., 1.); }
 vec3 spectral(float w){
   float x = clamp((w - 400.) / 300., 0., 1.);
@@ -76,122 +56,114 @@ vec3 spectral(float w){
   const vec3 x2 = vec3(0.11748627, 0.86755042, 0.66077860);
   const vec3 y2 = vec3(0.84897130, 0.88445281, 0.73949448);
   vec3 c = bump3y(c1 * (x - x1), y1) + bump3y(c2 * (x - x2), y2);
-  return c * smoothstep(375., 420., w) * (1. - smoothstep(690., 740., w));
+  return c * smoothstep(375., 425., w) * (1. - smoothstep(690., 740., w));
 }
 
-// ── precious opal ────────────────────────────────────────────
-// Each grain is a domain of stacked silica spheres (diameter D).
-// Bragg:  λ = 2 · n · d · cosθ   with d = 0.816·D (fcc 111 planes), n ≈ 1.37
-// Small spheres can only ever reach blue/violet; big spheres reach red.
-// Tilting (θ grows) always pushes colour toward the blue end and then into UV.
-vec3 grainLayer(vec2 q, vec2 view, float scale, float sharp, float gain, float pin){
-  vec2 qs = q * scale;
-  qs += .35 * vec2(fbm3(qs * 1.7), fbm3(qs * 1.7 + 5.3)) - .17;   // wavy grain borders
-  vec2 id;
-  vec2 v = voronoi(qs, id);
-  float h1 = hash12(id + 1.3 + uSeed);
-  float h2 = hash12(id * 1.7 + 4.2);
-  vec2 tilt = (hash22(id + 9.1) - .5) * 1.8;       // orientation of this grain's lattice
-
-  // sphere size: mostly small (blue/green); large (red) is rare — less rare deeper in.
-  float D = mix(175., 310., pow(h1, mix(2.4, 0.9, uDepth)));
-
-  // rolling flash: lattice orientation drifts slightly across a grain
-  float ripple = fbm3(q * 5.0 * scale + id * 3.1 + uTime * .03) - .5;
-  vec2 a = view - tilt - ripple * .45;
-  float theta = clamp(length(a) * .85, 0., 1.45);
-  float lambda = 2. * 1.37 * .816 * D * cos(theta);
-
-  float flash = exp(-dot(a, a) * sharp * mix(.7, 1.6, h2));
-
-  // striations: each grain streaks along its own direction
-  float ang = h2 * 6.2831;
-  vec2 dir = vec2(cos(ang), sin(ang));
-  float streak = fbm3(vec2(dot(qs, dir) * 9., dot(qs, vec2(-dir.y, dir.x)) * 1.5) + id);
-  float body = .25 + 1.1 * pow(streak, 1.6);
-
-  // pinfire: only bright pinpoints near grain centres, and only some grains
-  body *= mix(1., smoothstep(.38, .05, v.x) * step(.45, h2) * 2.2, pin);
-
-  float edge = smoothstep(.0, .06, v.y);           // dark seams between grains
-  return spectral(lambda) * flash * body * edge * gain;
+// ── region outline (must match regionRadius() in sketch.js) ──
+float regionDist(vec2 p, vec4 g, vec4 s, vec4 ph){
+  vec2 d = p - g.xy;
+  float th = atan(d.y, d.x);
+  float r = g.z * (1. + s.x * sin(2. * th + ph.x) + s.y * sin(3. * th + ph.y) + s.z * sin(5. * th + ph.z));
+  return length(d) / r;                       // < 1 inside
 }
 
-vec3 opal(vec2 p, vec2 view){
-  vec2 q = p + .45 * vec2(fbm3(p * .7 + 3.1), fbm3(p * .7 - 7.4)); // organic patch shapes
-  vec3 c = vec3(0.);
-  c += grainLayer(q,              view, 1.4, 1.4, 1.0, 0.);   // broad flash / harlequin patches
-  c += grainLayer(q * 1.3 + 17.,  view, 4.5, 2.2, .45, 0.);   // smaller grains
-  c += grainLayer(q + 41.,        view, 18., 3.0, .6,  1.);   // pinfire
-  c = 1. - exp(-c * 1.5);                                     // soft highlight roll-off
-  // black-opal body tone (≈N1–N2) with a faint milky haze
-  vec3 body = vec3(.012, .014, .02) + vec3(.03, .035, .05) * fbm3(q * 2.);
-  return body + c;
-}
+// ── the revealed field ───────────────────────────────────────
+// A slowly flowing, folded silica "surface". Its local slope is the
+// orientation of the sphere lattice; Bragg's law against the viewing
+// angle gives the colour:  λ = 2·n·(0.816·D)·cosθ.
+vec3 field(vec2 p, vec2 c, float variety, float seed, float life){
+  float isFire    = step(1.5, variety);
+  float isCrystal = step(.5, variety) * (1. - isFire);
 
-// ── rough stone (ironstone + potch) ──────────────────────────
-float stoneHeight(vec2 p){
-  vec2 w = p + .6 * vec2(fbm3(p * .8), fbm3(p * .8 + 5.2));
-  return fbm(w * 1.4);
+  float scale = mix(5.0, 3.2, isCrystal);
+  vec2 q = (p - c) * scale + seed * 17.;
+  float t = uTime * .045;
+
+  vec2 w1 = vec2(fbm4(q + vec2(0., t)), fbm4(q + vec2(5.2, -t)));
+  vec2 w2 = vec2(fbm4(q + 2.6 * w1 + vec2(1.7, 9.2) + t * .5), fbm4(q + 2.6 * w1 + vec2(8.3, 2.8)));
+  vec2 b  = q + 2.2 * w2;
+  float e = .02;
+  float f  = fbm4(b);
+  float fx = fbm4(b + vec2(e, 0.));
+  float fy = fbm4(b + vec2(0., e));
+  vec2 slope = vec2(fx - f, fy - f) / e;
+
+  // sphere size: varies across the stone; shrinks as the window fades
+  // (colour slides toward violet, then past the eye into UV)
+  float Dlo = mix(225., 200., isCrystal), Dhi = mix(310., 280., isCrystal);
+  float D = mix(Dlo, Dhi, smoothstep(.25, .75, fbm4(q * .45 + 3.3)));
+  D *= mix(.6, 1., smoothstep(.0, .6, life));
+
+  vec2 a = uView * .6 - slope * .5;
+  float cosT = cos(clamp(length(a) * .75, 0., 1.45));
+  float lambda = 2. * 1.37 * .816 * D * cosT;
+  float sharp = mix(2.6, 1.8, isCrystal);
+  float flash = exp(-dot(a, a) * sharp);
+
+  // folds catch more light than troughs
+  float fold = .2 + 1.5 * smoothstep(.4, .78, f);
+  vec3 col = spectral(lambda) * flash * fold;
+
+  // pinfire glints
+  vec2 gq = q * 9.;
+  vec2 gid = floor(gq);
+  vec2 gp = fract(gq) - hash22(gid + seed);
+  float glint = smoothstep(.12, .0, length(gp)) * step(.82, hash12(gid * 1.3 + seed));
+  vec2 gt = (hash22(gid + 4.1) - .5) * 2.2;
+  vec2 ga = uView * .6 - gt;
+  float gl = 2. * 1.37 * .816 * D * cos(clamp(length(ga) * .75, 0., 1.45));
+  col += spectral(gl) * glint * exp(-dot(ga, ga) * 3.) * 1.6;
+
+  // body tone per variety
+  vec3 body = vec3(.004, .006, .012);                                      // black opal
+  body = mix(body, vec3(.006, .012, .03) * (.4 + f), isCrystal);          // crystal: clear, near-black depth
+  col *= mix(1., 1.25, isCrystal);
+  vec3 fire = mix(vec3(.55, .05, .0), vec3(1., .48, .08), smoothstep(.3, .8, f)) * (.45 + .9 * f);
+  col = mix(col, fire + col * .25, isFire);                                // fire: warm body, faint flash
+  return body * (1. - isFire) + col;
 }
 
 void main(){
   vec2 frag = gl_FragCoord.xy;
-  vec2 uv   = frag / uRes;
-  float s   = min(uRes.x, uRes.y);
-  vec2 p    = (frag - .5 * uRes) / s * 3.;
+  float s = min(uRes.x, uRes.y);
+  vec2 p = (frag - .5 * uRes) / s;                // short side = 1, y up
 
-  // rubbed window; ragged, ground edge
-  float m = texture2D(uMask, vec2(uv.x, 1. - uv.y)).r;
-  m += (vnoise(p * 9.) - .5) * .18;
-  float clear = smoothstep(.42, .62, m);            // fully clear opal
-  float milky = smoothstep(.12, .42, m);            // drying / clouding hydrophane stage
-  float rim   = milky * (1. - clear);
-
-  // stone
-  vec2 w  = p + .6 * vec2(fbm3(p * .8), fbm3(p * .8 + 5.2));
-  float n = fbm(w * 1.4);
-  float strata = sin((w.y * 1.3 + n * 1.6) * 7.) * .5 + .5;
-  vec3 iron1 = vec3(.075, .042, .028);
-  vec3 iron2 = vec3(.24, .13, .065);
-  vec3 iron3 = vec3(.42, .25, .12);
-  vec3 stone = mix(iron1, iron2, smoothstep(.32, .68, n));
-  stone = mix(stone, iron3, smoothstep(.55, .95, strata * n * 1.25));
-  float potchAmt = smoothstep(.52, .66, fbm3(w * .55 + 20.));
-  stone = mix(stone, vec3(.36, .35, .34) * (.75 + .4 * n), potchAmt * .85);
-  stone *= .82 + .32 * vnoise(p * 140.);             // grit
-
-  // raking light that follows the viewer
-  float e  = 2.5 / s * 3.;
-  float hx = stoneHeight(p + vec2(e, 0.)) - n;
-  float hy = stoneHeight(p + vec2(0., e)) - n;
-  vec3 N   = normalize(vec3(-hx * 3., -hy * 3., e * 2.));
-  vec3 L   = normalize(vec3(uView.x * .9 + .3, -uView.y * .9 + .4, .8));
-  float lit = .55 + .65 * max(dot(N, L), 0.);
-  stone *= lit;
-
-  // thin seams of colour already visible in the rock (boulder-opal veins)
-  float vein = 1. - smoothstep(.0, .012, abs(fbm(w * .9 + 40.) - .5));
-  vein *= smoothstep(.3, .6, fbm3(w * .4 - 9.));
-
-  vec3 col = stone;
-  if (milky > .001 || vein > .001){
-    vec2 parallax = uView * .04;                     // colour sits *under* the surface
-    vec3 o = opal(p + parallax, uView);
-    col = mix(col, stone * .6 + o * .9, vein * .85);
-    // milky stage: colour fogged by white potch, like hydrophane drying
-    vec3 fog = mix(vec3(.30, .31, .33), vec3(.55, .57, .6), fbm3(p * 3.));
-    vec3 milkyOpal = mix(fog * .8, o, .35) ;
-    vec3 inside = mix(milkyOpal, o, clear);
-    col = mix(col, inside, milky);
-    // freshly ground rim catches the light
-    col += rim * vec3(.10, .09, .085) * lit;
+  float best = 0.; int bi = -1; float bd = 1.;
+  for (int i = 0; i < MAX_REGIONS; i++){
+    if (float(i) >= uCount) break;
+    vec4 st = uState[i];
+    if (st.x <= 0. && st.y <= 0.) continue;
+    float d = regionDist(p, uGeo[i], uShape[i], uPhase[i]);
+    if (d > 1.15) continue;
+    float R = uGeo[i].z;
+    float edgeN = (vnoise(p * 38. + float(i) * 9.) - .5) * .12;
+    float inside = 1. - smoothstep(.86, 1.0, d + edgeN);
+    // reveal spreads outward from where it was tapped
+    float front = length(p - st.zw) / (R * 2.6) + (vnoise(p * 22. - float(i)) - .5) * .1;
+    float spread = 1. - smoothstep(st.x - .12, st.x, front);
+    float m = inside * spread;
+    if (m > best){ best = m; bi = i; bd = d; }
   }
 
-  // vignette + living grain
-  vec2 vc = uv - .5;
-  col *= 1. - dot(vc, vc) * .9;
-  col += (hash12(frag + fract(uTime) * 100.) - .5) * .025;
+  vec3 col = vec3(0.);
+  if (bi >= 0 && best > .001){
+    vec4 g = vec4(0.), sh = vec4(0.), st = vec4(0.);
+    for (int i = 0; i < MAX_REGIONS; i++){ if (i == bi){ g = uGeo[i]; sh = uShape[i]; st = uState[i]; } }
+    float life = st.y;
+    col = field(p, g.xy, g.w, sh.w, life);
+
+    // fading: the stone breaks back down into its spheres —
+    // a stipple that retreats from the rim inward until it's gone
+    float grain = hash12(floor(frag / (1.6 * uDpr)) + sh.w * 31.);
+    float keep = life * 1.25 - .1 - (bd - .5) * .35;
+    float vis = smoothstep(grain - .12, grain + .02, keep);
+    // jewel contrast: deepen the darks, saturate
+    col = pow(max(col, 0.), vec3(1.3)) * 1.7;
+    float lum = dot(col, vec3(.299, .587, .114));
+    col = max(mix(vec3(lum), col, 1.3), 0.);
+    col *= best * vis;
+    col = 1. - exp(-col * 1.5);
+  }
 
   gl_FragColor = vec4(col, 1.);
 }
